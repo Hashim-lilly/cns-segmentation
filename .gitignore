@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ML artefacts
+experiments/
+mlruns/
+*.pth
+*.ckpt
+*.onnx
+
+# Data — tracked by git-annex or DVC, not git
+data/spine-generic/sub-*/
+data/spine-generic/derivatives/
+*.nii
+*.nii.gz
+*.dcm
+
+# Editors
+.vscode/settings.json
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# Ruff
+.ruff_cache/

@@ -1,0 +1,53 @@
+# Inference and mesh export configuration
+
+model:
+  checkpoint: experiments/spine_segresnet_phase1/best_model.pth
+  architecture: SegResNet
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 2
+  init_filters: 32
+  blocks_down: [1, 2, 2, 4]
+  blocks_up: [1, 1, 1]
+  dropout_prob: 0.2
+
+inference:
+  sliding_window:
+    roi_size: [48, 160, 160]
+    overlap: 0.5
+    mode: gaussian
+
+  threshold: 0.5
+  keep_largest_component: true
+
+  # MC-Dropout uncertainty (Phase 3)
+  uncertainty:
+    enabled: false
+    n_samples: 8
+    metrics:
+      - predictive_entropy
+      - mutual_information
+      - variance
+
+preprocessing:
+  orientation: RAS
+  spacing: [1.0, 0.5, 0.5]
+  normalize: true
+  nonzero_norm: true
+
+mesh:
+  enabled: true
+  smooth_iterations: 5
+  smooth_lambda: 0.5
+  smooth_mu: -0.53
+  decimate_target: null
+  min_component_volume_mm3: 100.0
+
+output:
+  save_predictions: true
+  save_uncertainty: true
+  save_mesh: true
+  output_dir: experiments/predictions
+  # STL files written here are consumed by cns-cfd-simulation
+
+device: auto

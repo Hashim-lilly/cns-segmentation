@@ -1,0 +1,87 @@
+# Training configuration for Spine-Generic T2w spinal cord segmentation
+
+data:
+  dataset: spine-generic
+  root_dir: data/spine-generic
+  contrast: T2w
+  label_key: label-SC_seg
+
+  # Site-based split — split by SITE, never randomly
+  train_sites:
+    - amu
+    - balgrist
+    - barcelona
+    - beijing
+    - brno
+    - cardiff
+    - chiba
+    - cmrra
+    - douglas
+    - geneva
+    - juntendo
+    - hamburg
+    - mgh
+    - mountsinai
+    - nottingham
+    - oxford
+    - pavia
+    - perform
+    - sherbrooke
+    - strasbourg
+    - tokyo
+    - ucl
+    - vuiis
+  val_sites:
+    - stanford
+    - tehranS
+    - ubc
+    - ucdavis
+    - unf
+
+  min_file_size: 1000  # bytes — skip git-annex pointer stubs
+
+model:
+  architecture: SegResNet
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 2
+  init_filters: 32
+  blocks_down: [1, 2, 2, 4]
+  blocks_up: [1, 1, 1]
+  dropout_prob: 0.2  # required for Phase 3 MC-Dropout
+
+training:
+  patch_size: [48, 160, 160]
+  batch_size: 2
+  num_samples: 4
+  pos_neg_ratio: 2
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  optimizer: AdamW
+  scheduler: CosineAnnealingLR
+  scheduler_params:
+    T_max: 100
+    eta_min: 1.0e-6
+
+  # Phase 1: DiceCE baseline
+  loss:
+    name: DiceCELoss
+    params:
+      include_background: false
+      to_onehot_y: true
+      softmax: true
+
+  # Phase 2 combined loss (uncomment to activate)
+  # loss:
+  #   name: CombinedLoss
+  #   params:
+  #     dice_ce_weight: 1.0
+  #     cldice_weight: 0.5
+  #     cldice_iterations: 3
+
+preprocessing:
+  spacing: [1.0, 0.5, 0.5]
+
+output:
+  experiment_dir: experiments/spine_segresnet_phase1
