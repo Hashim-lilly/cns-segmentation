@@ -1,4 +1,4 @@
-# Inference and mesh export configuration
+# Inference configuration for trained models
 
 model:
   checkpoint: experiments/spine_segresnet_phase1/best_model.pth
@@ -17,12 +17,13 @@ inference:
     overlap: 0.5
     mode: gaussian
 
+  # Post-processing
   threshold: 0.5
   keep_largest_component: true
 
   # MC-Dropout uncertainty (Phase 3)
   uncertainty:
-    enabled: false
+    enabled: false  # set true in Phase 3
     n_samples: 8
     metrics:
       - predictive_entropy
@@ -39,15 +40,13 @@ mesh:
   enabled: true
   smooth_iterations: 5
   smooth_lambda: 0.5
-  smooth_mu: -0.53
-  decimate_target: null
-  min_component_volume_mm3: 100.0
+  decimate_target: null  # set to reduce face count if needed
+  output_format: stl
 
 output:
   save_predictions: true
   save_uncertainty: true
   save_mesh: true
   output_dir: experiments/predictions
-  # STL files written here are consumed by cns-cfd-simulation
 
 device: auto

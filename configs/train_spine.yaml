@@ -1,12 +1,14 @@
 # Training configuration for Spine-Generic T2w spinal cord segmentation
+# Phase 1: DiceCE loss baseline
+# Phase 2: Add combined loss (DiceCE + clDice)
 
 data:
   dataset: spine-generic
   root_dir: data/spine-generic
   contrast: T2w
-  label_key: label-SC_seg
+  label_key: label-SC_seg  # spinal cord binary mask
 
-  # Site-based split — split by SITE, never randomly
+  # Site-based split for cross-vendor validation
   train_sites:
     - amu
     - balgrist
@@ -38,23 +40,24 @@ data:
     - ucdavis
     - unf
 
-  min_file_size: 1000  # bytes — skip git-annex pointer stubs
+  # Git-annex handling
+  min_file_size: 1000  # bytes — skip annex pointer stubs
 
 model:
   architecture: SegResNet
   spatial_dims: 3
   in_channels: 1
-  out_channels: 2
+  out_channels: 2  # background + spinal cord
   init_filters: 32
   blocks_down: [1, 2, 2, 4]
   blocks_up: [1, 1, 1]
-  dropout_prob: 0.2  # required for Phase 3 MC-Dropout
+  dropout_prob: 0.2  # needed for Phase 3 MC-Dropout
 
 training:
   patch_size: [48, 160, 160]
   batch_size: 2
-  num_samples: 4
-  pos_neg_ratio: 2
+  num_samples: 4  # patches per volume per epoch
+  pos_neg_ratio: 2  # for RandCropByPosNegLabel
   epochs: 100
   lr: 1.0e-4
   weight_decay: 1.0e-5
@@ -64,24 +67,56 @@ training:
     T_max: 100
     eta_min: 1.0e-6
 
-  # Phase 1: DiceCE baseline
+  # Loss configuration
   loss:
-    name: DiceCELoss
+    name: DiceCELoss  # Phase 1; switch to CombinedLoss in Phase 2
     params:
       include_background: false
       to_onehot_y: true
       softmax: true
 
-  # Phase 2 combined loss (uncomment to activate)
+  # Phase 2 combined loss (uncomment when ready)
   # loss:
   #   name: CombinedLoss
   #   params:
   #     dice_ce_weight: 1.0
   #     cldice_weight: 0.5
-  #     cldice_iterations: 3
+  #     cldice_iter: 3
+
+  # Augmentation
+  augmentation:
+    rand_flip_prob: 0.5
+    rand_flip_axes: [1, 2]
+    rand_rotate90_prob: 0.3
+    rand_rotate90_axes: [1, 2]
+    rand_gaussian_noise_prob: 0.2
+    rand_gaussian_noise_std: 0.05
+
+  # Validation
+  val_interval: 5  # validate every N epochs
+  sliding_window:
+    roi_size: [48, 160, 160]
+    overlap: 0.5
+    mode: gaussian
+
+  # Checkpointing
+  save_best: true
+  metric_for_best: val_dice
+  early_stopping:
+    patience: 20
+    min_delta: 0.001
 
 preprocessing:
-  spacing: [1.0, 0.5, 0.5]
+  orientation: RAS
+  spacing: [1.0, 0.5, 0.5]  # z, y, x in mm
+  normalize: true
+  nonzero_norm: true
 
 output:
-  experiment_dir: experiments/spine_segresnet_phase1
+  experiment_dir: experiments
+  experiment_name: spine_segresnet_phase1
+  mlflow_tracking_uri: experiments/mlruns
+
+device: auto  # auto-detect: mps > cuda > cpu
+seed: 42
+num_workers: 4

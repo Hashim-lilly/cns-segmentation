@@ -1,48 +1,52 @@
+# .gitignore for CNS Segmentation Pipeline
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
 .venv/
 venv/
-env/
+ENV/
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-*.egg
-.eggs/
+# Data (managed by git-annex or downloaded separately)
+data/spine-generic/
+data/msd_hippocampus/
+data/reference_geometry/
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# ML artefacts
+# Experiments and model artifacts
 experiments/
 mlruns/
 *.pth
-*.ckpt
+*.pt
 *.onnx
 
-# Data — tracked by git-annex or DVC, not git
-data/spine-generic/sub-*/
-data/spine-generic/derivatives/
-*.nii
-*.nii.gz
-*.dcm
-
-# Editors
-.vscode/settings.json
+# IDE
 .idea/
+.vscode/
 *.swp
-*~
+*.swo
 
-# macOS
+# OS
 .DS_Store
+Thumbs.db
 
-# Ruff
-.ruff_cache/
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# Cache
+.*cache/
+
+#miscellaneous
+.claude*/
+.container*/
+container/

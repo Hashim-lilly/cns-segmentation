@@ -1,0 +1,169 @@
+# cns-pytorch.def
+# Container for the CNS spinal cord segmentation pipeline (MONAI/SegResNet).
+Bootstrap: docker
+From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+# Compute nodes can't reach pypi.org directly. The build script places a
+# transient copy of the user's Artifactory pip mirror config at ./pip.conf
+# (same directory as this .def) before invoking `apptainer build`; it is
+# copied in here for %post's pip installs, then deleted before %post ends
+# so the credential never ends up baked into the final image.
+%files
+    pip.conf /etc/pip.conf
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export CUDA_HOME="/usr/local/cuda-12.4"
+    export PATH="/usr/local/cuda-12.4/bin:$PATH"
+    export LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH"
+    export PYTHONUNBUFFERED=1
+    export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    # MLflow >=3.x refuses to write to a plain filesystem tracking store
+    # (e.g. "experiments/mlruns") unless explicitly opted back in.
+    export MLFLOW_ALLOW_FILE_STORE=true
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Install basic dependencies and add deadsnakes PPA for Python 3.12
+    apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        && add-apt-repository -y ppa:deadsnakes/ppa \
+        && apt-get update
+
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        curl \
+        ca-certificates \
+        libjpeg-dev \
+        libpng-dev \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        libgl1 \
+        libgomp1 \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+        wget \
+        nano \
+        vim \
+        && apt-get clean \
+        && apt-get autoremove \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Update CA certificates
+    update-ca-certificates
+
+    # Set Python 3.12 as default
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+
+    # Install pip for Python 3.12
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
+
+    python3 -m pip install --upgrade pip setuptools wheel
+
+    # Pre-install torch's small pure-Python transitive deps through the
+    # Artifactory mirror ONLY (no pytorch extra index here). pip's resolver
+    # doesn't reliably prefer the primary index when a package is listed by
+    # both indices — for generic deps like networkx, it can pick pytorch's
+    # index entry, whose actual file lives on the unreachable
+    # files.pythonhosted.org. Satisfying them here first means the torch
+    # install below finds them already installed and never touches that
+    # ambiguous path.
+    #
+    # sympy MUST be pinned to exactly 1.13.1 here: torch==2.5.1 requires
+    # sympy==1.13.1 exactly (not a range), so installing an unpinned/latest
+    # sympy leaves that requirement unsatisfied and forces pip to re-resolve
+    # sympy during the torch install anyway — which is exactly the resolution
+    # that lands on files.pythonhosted.org.
+    pip3 install --no-cache-dir \
+        filelock \
+        typing-extensions \
+        networkx \
+        jinja2 \
+        fsspec \
+        sympy==1.13.1 \
+        mpmath
+
+    # --extra-index-url (not --index-url) keeps /etc/pip.conf's Artifactory
+    # mirror as the primary index — files.pythonhosted.org is unreachable
+    # from this cluster's compute nodes, only download.pytorch.org and the
+    # Artifactory mirror are.
+    pip3 install --no-cache-dir \
+        torch==2.5.1 \
+        torchvision==0.20.1 \
+        torchaudio==2.5.1 \
+        --extra-index-url https://download.pytorch.org/whl/cu124
+
+    # The base Ubuntu image ships blinker as an apt-managed distutils install
+    # with no RECORD file, which pip refuses to uninstall when streamlit
+    # (below) wants to pull in a newer blinker. Force just that one package
+    # in its own call — --ignore-installed here is scoped to blinker only,
+    # so it doesn't make the main install below disregard the torch==2.5.1
+    # we just pinned above (a blanket --ignore-installed on that line
+    # previously caused pip to freely re-resolve and silently upgrade torch
+    # to an incompatible cu130 build and numpy to 2.x, breaking everything).
+    pip3 install --no-cache-dir --ignore-installed blinker
+
+    # Core pipeline deps — numpy pinned <2.0 to stay ABI-compatible with
+    # torch==2.5.1. Plain `monai` (no extras) — the `[all]` extra pulls in
+    # unrelated domains this pipeline doesn't use (WSI/pathology via
+    # openslide+cucim, federated learning via nni/clearml, HF transformers,
+    # CUDA-13 packages) and those extras' own requirements were what forced
+    # torch/numpy to be silently upgraded to incompatible versions.
+    #
+    # monai capped at <1.5: unbounded "monai>=1.3" resolves to a release
+    # whose own (non-extras) install_requires floors on torch>=2.8.0, which
+    # silently uninstalls our pinned torch==2.5.1+cu124 and replaces it with
+    # a cu130 build the cluster's driver (max CUDA 12.4) can't actually use —
+    # torch.cuda.is_available() then reports False even on a GPU node.
+    pip3 install --no-cache-dir \
+        "numpy>=1.24,<2.0" \
+        "pandas>=2.0" \
+        "pyyaml>=6.0" \
+        "rich>=13.0" \
+        "typer>=0.9" \
+        "plotly>=5.18" \
+        "nibabel>=5.0" \
+        "SimpleITK>=2.3" \
+        "scikit-image>=0.21" \
+        "trimesh>=4.0" \
+        "pymeshlab>=2023.12" \
+        "mlflow>=2.10" \
+        "streamlit>=1.30" \
+        "monai>=1.3,<1.5"
+
+    # Dev + topology (Phase 2 clDice) extras
+    pip3 install --no-cache-dir \
+        "pytest>=7.4" \
+        "pytest-cov>=4.1" \
+        "ruff>=0.1" \
+        "gudhi>=3.8"
+
+    echo "=== Verifying installation ==="
+    python3 --version
+    python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA available: {torch.cuda.is_available()}')"
+    python3 -c "import monai; print(f'MONAI: {monai.__version__}')"
+    python3 -c "import nibabel; print(f'nibabel: {nibabel.__version__}')"
+    python3 -c "import SimpleITK; print(f'SimpleITK: {SimpleITK.Version.VersionString()}')"
+    python3 -c "import trimesh; print(f'trimesh: {trimesh.__version__}')"
+    python3 -c "import pymeshlab; print('pymeshlab: OK')"
+    python3 -c "import mlflow; print(f'mlflow: {mlflow.__version__}')"
+    python3 -c "import numpy; print(f'numpy: {numpy.__version__}')"
+
+    # Scrub the pip mirror credential — must not persist in the final image.
+    rm -f /etc/pip.conf
+
+%runscript
+    exec python3 "$@"
+
+%labels
+    Author CNS Drug Delivery Team
+    Version 1.0-py312
+    Description PyTorch 2.5.1 + CUDA 12.4 + Python 3.12 + MONAI (CNS segmentation pipeline)

@@ -1,20 +1,28 @@
-# cns-segmentation
+# CNS Segmentation Pipeline
 
-Automated spinal cord + CSF segmentation from T2-weighted MRI, producing watertight STL meshes for CFD simulation. Part of the **CNS Digital Twin** pipeline.
+Automated spinal cord and CSF segmentation from T2-weighted MRI for computational fluid dynamics (CFD) simulation of intrathecal drug delivery.
 
 ## Overview
 
-```
-T2w MRI (NIfTI) → SegResNet → binary mask → marching cubes → repaired STL
-```
+This pipeline:
 
-Downstream consumer: [`cns-cfd-simulation`](../cns-cfd-simulation/) ingests the exported STL meshes.
+1. Takes T2-weighted spinal MRI as input
+2. Segments spinal cord + CSF spaces using SegResNet (3D)
+3. Exports watertight, manifold STL meshes suitable for CFD
+4. Provides calibrated per-voxel uncertainty via MC-Dropout
 
 ## Quick Start
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+# Setup environment
+python3.10 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
+
+# Download data (requires git-annex)
+brew install git-annex
+git clone https://github.com/spine-generic/data-multi-subject.git data/spine-generic
+cd data/spine-generic && git annex get sub-amu01 sub-amu05 sub-balgrist01 sub-balgrist02
 
 # Train
 python scripts/train.py --config configs/train_spine.yaml
@@ -22,51 +30,38 @@ python scripts/train.py --config configs/train_spine.yaml
 # Evaluate
 python scripts/evaluate.py --config configs/inference.yaml
 
-# Export mesh from a segmentation prediction
+# Export mesh
 python scripts/export_mesh.py --input prediction.nii.gz --output mesh.stl
+
+# Run demo
+streamlit run src/demo/app.py
 ```
 
-## Project Layout
+## Project Structure
 
 ```
-src/cns_segmentation/
-├── data/         — BIDS data loaders, MONAI transforms
-├── models/       — SegResNet factory, MC-Dropout wrapper
-├── losses/       — Soft clDice, CombinedLoss
-├── training/     — Training loop with MLflow tracking
-├── evaluation/   — Dice/HD95 metrics, ECE calibration
-└── mesh/         — Mask → watertight STL export
-configs/          — YAML configs (train, inference)
-scripts/          — CLI entry points
-tests/            — Unit tests
+src/data/       — BIDS-aware data loaders, MONAI transforms
+src/models/     — SegResNet factory, MC-Dropout wrapper
+src/losses/     — Soft clDice topology loss
+src/training/   — Training loop with MLflow tracking
+src/evaluation/ — Metrics (Dice, HD95, ECE)
+src/mesh/       — Mask → watertight STL mesh pipeline
+src/demo/       — Streamlit dashboard
+configs/        — YAML training/inference configs
+scripts/        — CLI entry points
 ```
 
-## Mesh Output Contract
+## Key Metrics
 
-Meshes exported by this repo satisfy:
-- Watertight (no open boundaries)
-- Manifold (no non-manifold edges/vertices)
-- Euler number χ = 2
-- Format: binary STL, coordinate space: RAS, units: mm
+| Metric           | Target  | Achieved |
+| ---------------- | ------- | -------- |
+| Spinal cord Dice | ≥ 0.93 | —       |
+| Mesh watertight  | 100%    | —       |
+| Uncertainty ECE  | < 0.05  | —       |
+| Inference time   | < 5 min | —       |
 
-These guarantees are required by `cns-cfd-simulation`.
+## References
 
-## Targets
-
-| Metric | Target |
-|---|---|
-| Spinal cord Dice | ≥ 0.93 |
-| Mesh watertight | 100% |
-| Mesh manifold | 100% |
-| Uncertainty ECE | < 0.05 |
-| Inter-vendor CV | < 5% |
-| Inference time | < 5 min/case |
-
-## Tech Stack
-
-- Python 3.10+, PyTorch 2.x, MONAI
-- Architecture: SegResNet (3D)
-- Loss: DiceCE + Soft clDice
-- Uncertainty: MC-Dropout (8 passes)
-- Mesh repair: marching cubes + trimesh
-- Tracking: MLflow
+- Cohen-Adad et al. 2021 — Spine-Generic dataset (DOI: 10.1038/s41597-021-00941-8)
+- Montoya/Teli et al. 2024 — Lilly CSF modeling (DOI: 10.1002/alz.094612)
+- Shit et al. 2021 — clDice topology loss (arXiv: 2003.07311)
