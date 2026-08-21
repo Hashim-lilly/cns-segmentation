@@ -43,8 +43,8 @@ topo = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
+where = ["src"]
+include = ["cns_segmentation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

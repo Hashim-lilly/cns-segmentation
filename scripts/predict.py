@@ -11,10 +11,10 @@ Usage:
     python scripts/predict.py --config configs/inference.yaml
     python scripts/predict.py --checkpoint experiments/spine_segresnet_phase1_20260811_120000/checkpoints/best_model.pth
     python scripts/predict.py --split train --limit 5
+    python scripts/predict.py --config configs/inference_canal.yaml --train-config configs/train_spine_canal.yaml
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -35,18 +35,13 @@ from rich.table import Table
 from scipy import ndimage
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.data.spine_generic import create_datalist  # noqa: E402
-from src.data.transforms import get_val_transforms  # noqa: E402
-from src.evaluation.metrics import (  # noqa: E402
-    aggregate_metrics,
-    compute_dice,
-    compute_hausdorff95,
-    compute_surface_dice,
-    compute_volume_error,
-)
-from src.models.segresnet import create_segresnet, empty_cache, get_device  # noqa: E402
+from cns_segmentation.data.dataset_registry import get_dataset, merge_label_keys
+from cns_segmentation.data.label_compositing import DEFAULT_LABEL_PRIORITY
+from cns_segmentation.data.spine_generic import create_datalist, flatten_structure_labels
+from cns_segmentation.data.transforms import get_val_transforms
+from cns_segmentation.evaluation.metrics import aggregate_metrics, evaluate_subject
+from cns_segmentation.models.segresnet import create_segresnet, empty_cache, get_device
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,7 +115,9 @@ def _save_overlay_png(
     """Save a 4-panel mid-slice overlay (input / GT / prediction / overlay).
 
     Picks the axial slice with the most ground-truth label voxels, matching
-    the convention used in notebooks/04_model_training.ipynb.
+    the convention used in notebooks/04_model_training.ipynb. `label`/`pred`
+    are expected to already be binarized (any-nonzero) — multi-class color
+    overlays are deferred to a later phase.
 
     Args:
         image: 3D input MRI volume.
@@ -165,23 +162,40 @@ def _save_overlay_png(
     plt.close(fig)
 
 
-def _print_summary(summary: dict, target_dice: float = 0.93) -> None:
-    """Print a rich summary table of aggregate Dice/HD95/NSD metrics.
+def _flatten_result(result: dict) -> dict:
+    """Flatten a nested per-structure evaluate_subject() result for CSV export.
 
     Args:
-        summary: Output of aggregate_metrics().
-        target_dice: Phase 1 target Dice score for comparison.
-    """
-    overall = summary.get("overall", {})
+        result: Output of `evaluate_subject()` — flat (no class_map) or
+            nested (class_map provided: structure name -> metrics dict,
+            plus "overall").
 
-    table = Table(title="Overall Metrics", show_header=True)
+    Returns:
+        Flat dict suitable for a DataFrame row. Nested structure metrics
+        are renamed "<structure>_<metric>". Byte-identical passthrough for
+        the flat (cord-only) shape.
+    """
+    if "dice" in result:
+        return result
+    flat = {"subject": result["subject"], "site": result["site"]}
+    for structure, metrics in result.items():
+        if structure in ("subject", "site"):
+            continue
+        for metric_key, value in metrics.items():
+            flat[f"{structure}_{metric_key}"] = value
+    return flat
+
+
+def _print_metrics_table(stats_by_metric: dict, title: str) -> None:
+    """Print one rich table of mean/std/n for the four standard metrics."""
+    table = Table(title=title, show_header=True)
     table.add_column("Metric", style="bold cyan")
     table.add_column("Mean")
     table.add_column("Std")
     table.add_column("N")
 
     for key in ["dice", "hausdorff95_mm", "volume_error_mm3", "surface_dice"]:
-        stats = overall.get(key, {})
+        stats = stats_by_metric.get(key, {})
         table.add_row(
             key,
             f"{stats.get('mean', float('nan')):.4f}",
@@ -192,7 +206,27 @@ def _print_summary(summary: dict, target_dice: float = 0.93) -> None:
     console.print()
     console.print(table)
 
-    dice_mean = overall.get("dice", {}).get("mean", float("nan"))
+
+def _print_summary(summary: dict, target_dice: float = 0.93) -> None:
+    """Print a rich summary table of aggregate Dice/HD95/NSD metrics.
+
+    Args:
+        summary: Output of aggregate_metrics(). May be the flat shape or
+            the nested per-structure shape — detected automatically.
+        target_dice: Phase 1 target Dice score for comparison.
+    """
+    overall = summary.get("overall", {})
+    nested = "dice" not in overall
+
+    if nested:
+        for structure, stats_by_metric in overall.items():
+            _print_metrics_table(stats_by_metric, title=f"Overall Metrics — {structure}")
+        dice_source = overall.get("overall", {})
+    else:
+        _print_metrics_table(overall, title="Overall Metrics")
+        dice_source = overall
+
+    dice_mean = dice_source.get("dice", {}).get("mean", float("nan"))
     status = "[green]MEETS[/green]" if dice_mean >= target_dice else "[red]BELOW[/red]"
     console.print(
         Panel(
@@ -207,8 +241,8 @@ def _print_summary(summary: dict, target_dice: float = 0.93) -> None:
     site_table.add_column("Mean Dice")
     site_table.add_column("N")
     for site, stats in summary.get("per_site", {}).items():
-        dice_stats = stats.get("dice", {})
-        site_table.add_row(site, f"{dice_stats.get('mean', float('nan')):.4f}", str(dice_stats.get("n", 0)))
+        site_dice_stats = (stats.get("overall", {}) if nested else stats).get("dice", {})
+        site_table.add_row(site, f"{site_dice_stats.get('mean', float('nan')):.4f}", str(site_dice_stats.get("n", 0)))
     console.print(site_table)
 
 
@@ -252,9 +286,11 @@ def predict(
     """Run sliding-window inference and export CPU-viewable artifacts.
 
     For each subject: runs sliding-window inference, computes Dice/HD95/
-    volume-error/surface-Dice against the ground truth, saves a prediction
-    NIfTI, and saves a 4-panel mid-slice overlay PNG. Writes a per-subject
-    CSV and an aggregate metrics YAML at the end.
+    volume-error/surface-Dice against the ground truth (per-structure plus
+    "overall" for multi-class models, matching train_config's data.dataset),
+    saves a prediction NIfTI, saves the composited label NIfTI, and saves a
+    4-panel mid-slice overlay PNG. Writes a per-subject CSV and an aggregate
+    metrics YAML at the end.
     """
     console.print(Panel("[bold]CNS Batch Inference[/bold]", border_style="blue", expand=False))
 
@@ -271,26 +307,57 @@ def predict(
 
     out_dir = _resolve(output_dir) if output_dir is not None else _resolve(Path(cfg["output"]["output_dir"]))
     predictions_dir = out_dir / "predictions"
+    labels_dir = out_dir / "labels"
     overlays_dir = out_dir / "overlays"
     predictions_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
     overlays_dir.mkdir(parents=True, exist_ok=True)
 
     device = get_device()
     logger.info("Using device: %s", device)
 
+    # Resolve dataset registry entry/entries the same way SegmentationTrainer
+    # does: data.dataset may be a single registry key (legacy cord-only) or
+    # a list of keys (multi-structure), which drives label compositing.
+    data_cfg = train_cfg["data"]
+    dataset_name = data_cfg.get("dataset", "spine_generic_cord")
+    dataset_names = [dataset_name] if isinstance(dataset_name, str) else list(dataset_name)
+    multi_structure = dataset_names != ["spine_generic_cord"]
+
+    label_keys = None
+    require_all_labels = False
+    structures: Optional[list[str]] = None
+    class_map: Optional[dict[str, int]] = None
+    if multi_structure:
+        specs = [get_dataset(name) for name in dataset_names]
+        label_keys = merge_label_keys(*specs)
+        structures = [s for s in DEFAULT_LABEL_PRIORITY if s in label_keys]
+        require_all_labels = len(structures) > 1
+        class_map = {s: i + 1 for i, s in enumerate(structures)}
+
     datalist = create_datalist(
-        root_dir=_resolve(Path(train_cfg["data"]["root_dir"])),
+        root_dir=_resolve(Path(data_cfg["root_dir"])),
         sites=sites,
-        min_file_size=train_cfg["data"].get("min_file_size", 1000),
+        min_file_size=data_cfg.get("min_file_size", 1000),
+        label_keys=label_keys,
+        require_all_labels=require_all_labels,
     )
+    if multi_structure:
+        datalist = flatten_structure_labels(datalist)
+
     if not datalist:
         console.print(f"[bold red]No subjects found for split='{split}' sites={sites}[/bold red]")
         raise typer.Exit(code=1)
     if limit is not None:
         datalist = datalist[:limit]
-    logger.info("Running inference on %d subjects (split=%s)", len(datalist), split)
+    logger.info(
+        "Running inference on %d subjects (split=%s, structures=%s)",
+        len(datalist),
+        split,
+        structures,
+    )
 
-    val_transforms = get_val_transforms({"spacing": cfg["preprocessing"]["spacing"]})
+    val_transforms = get_val_transforms({"spacing": cfg["preprocessing"]["spacing"]}, structures=structures)
 
     model = create_segresnet(cfg["model"])
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -310,12 +377,18 @@ def predict(
         sw_batch_size=1,
     )
     keep_largest = cfg["inference"].get("keep_largest_component", False)
-    spacing = tuple(float(s) for s in cfg["preprocessing"]["spacing"])
 
     results = []
     for item in track(datalist, description="Predicting", console=console):
         subject_id = item["subject"]
-        data = val_transforms({"image": item["image"], "label": item["label"]})
+        if multi_structure:
+            transform_input = {
+                "image": item["image"],
+                **{f"label_{s}": item[f"label_{s}"] for s in structures},
+            }
+        else:
+            transform_input = {"image": item["image"], "label": item["label"]}
+        data = val_transforms(transform_input)
 
         image_t = data["image"]
         label_np = data["label"][0].numpy().astype(np.uint8)
@@ -330,30 +403,29 @@ def predict(
         if keep_largest:
             pred_np = _keep_largest_component(pred_np)
 
-        dice = compute_dice(pred_np, label_np)
-        hd95 = compute_hausdorff95(pred_np, label_np, spacing)
-        vol_err = compute_volume_error(pred_np, label_np, spacing)
-        nsd = compute_surface_dice(pred_np, label_np, spacing)
-        results.append(
-            {
-                "subject": subject_id,
-                "site": item["site"],
-                "dice": dice,
-                "hausdorff95_mm": hd95,
-                "volume_error_mm3": vol_err,
-                "surface_dice": nsd,
-            }
-        )
-
         affine = image_t.affine.numpy() if hasattr(image_t, "affine") else np.eye(4)
-        nib.save(nib.Nifti1Image(pred_np, affine), predictions_dir / f"{subject_id}_pred.nii.gz")
+        pred_path = predictions_dir / f"{subject_id}_pred.nii.gz"
+        label_path = labels_dir / f"{subject_id}_label.nii.gz"
+        nib.save(nib.Nifti1Image(pred_np, affine), pred_path)
+        nib.save(nib.Nifti1Image(label_np, affine), label_path)
+
+        result = evaluate_subject(pred_path, label_path, class_map=class_map)
+        result["subject"] = subject_id
+        result["site"] = item["site"]
+        results.append(result)
+        overall_dice = result["overall"]["dice"] if multi_structure else result["dice"]
 
         image_np = image_t[0].cpu().numpy()
         _save_overlay_png(
-            image_np, label_np, pred_np, dice, subject_id, overlays_dir / f"{subject_id}_overlay.png"
+            image_np,
+            (label_np > 0).astype(np.uint8),
+            (pred_np > 0).astype(np.uint8),
+            overall_dice,
+            subject_id,
+            overlays_dir / f"{subject_id}_overlay.png",
         )
 
-    results_df = pd.DataFrame(results)
+    results_df = pd.DataFrame([_flatten_result(r) for r in results])
     results_df.to_csv(out_dir / "dice_per_subject.csv", index=False)
 
     summary = aggregate_metrics(results)
@@ -363,6 +435,7 @@ def predict(
     _print_summary(summary)
     console.print(f"\n[bold green]Artifacts written to:[/bold green] {out_dir}")
     console.print(f"  Predictions: {predictions_dir}")
+    console.print(f"  Labels:      {labels_dir}")
     console.print(f"  Overlays:    {overlays_dir}")
     console.print(f"  Per-subject: {out_dir / 'dice_per_subject.csv'}")
     console.print(f"  Summary:     {out_dir / 'metrics_summary.yaml'}")

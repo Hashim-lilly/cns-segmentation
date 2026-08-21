@@ -3,10 +3,9 @@
 # Phase 2: Add combined loss (DiceCE + clDice)
 
 data:
-  dataset: spine-generic
   root_dir: data/spine-generic
   contrast: T2w
-  label_key: label-SC_seg  # spinal cord binary mask
+  dataset: spine_generic_cord  # registry key, see data/dataset_registry.py
 
   # Site-based split for cross-vendor validation
   train_sites:

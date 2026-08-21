@@ -15,9 +15,10 @@ venv/
 ENV/
 
 # Data (managed by git-annex or downloaded separately)
+data/alkafri_mendeley/
+data/openneuro_ds004507/
+data/spider/
 data/spine-generic/
-data/msd_hippocampus/
-data/reference_geometry/
 
 # Experiments and model artifacts
 experiments/
@@ -50,3 +51,6 @@ logs/
 .claude*/
 .container*/
 container/
+
+# Disposable debugging/helper scripts for in-progress phase development
+dev_scratch/

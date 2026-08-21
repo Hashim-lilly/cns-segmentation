@@ -1,0 +1,113 @@
+# Training configuration for Spine-Generic T2w cord+canal+csf segmentation
+# Phase 1 multi-structure: 4-class (background + cord + canal + csf)
+#
+# Reachability verified empirically against on-disk labels: only 10 subjects
+# across 7 sites have cord+canal+csf simultaneously (require_all_labels is
+# set implicitly by the trainer whenever >1 structure is requested). This is
+# the smallest of the three Phase 1 pools — treat results as a directional
+# smoke test, not a statistically powered evaluation.
+#
+# Val split (barcelona, geneva = 2 of 10 subjects) holds out two sites while
+# leaving the other 5 sites (8 subjects) for training.
+
+data:
+  root_dir: data/spine-generic
+  contrast: T2w
+  dataset:  # registry keys, see data/dataset_registry.py — merged for compositing
+    - spine_generic_cord
+    - spine_generic_canal
+    - spine_generic_csf
+
+  train_sites:
+    - cmrrb
+    - nottwil
+    - pavia
+    - perform
+    - tokyoIngenia
+  val_sites:
+    - barcelona
+    - geneva
+
+  # Git-annex handling
+  min_file_size: 1000  # bytes — skip annex pointer stubs
+
+model:
+  architecture: SegResNet
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 4  # background + cord + canal + csf
+  init_filters: 32
+  blocks_down: [1, 2, 2, 4]
+  blocks_up: [1, 1, 1]
+  dropout_prob: 0.2  # needed for Phase 3 MC-Dropout
+
+training:
+  patch_size: [48, 160, 160]
+  batch_size: 2
+  num_samples: 4  # patches per volume per epoch
+  pos_neg_ratio: 2  # for RandCropByPosNegLabel
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  optimizer: AdamW
+  scheduler: CosineAnnealingLR
+  scheduler_params:
+    T_max: 100
+    eta_min: 1.0e-6
+
+  # Loss configuration: DiceCE + Soft clDice (topology-aware)
+  loss:
+    name: CombinedLoss
+    params:
+      dice_ce_weight: 1.0
+      cldice_weight: 0.5
+      cldice_iter: 3
+
+  # Augmentation — heavy contrast/intensity domain randomization to help
+  # compensate for the very small (10-subject) training pool.
+  augmentation:
+    rand_flip_prob: 0.5
+    rand_flip_axes: [1, 2]
+    rand_rotate90_prob: 0.3
+    rand_rotate90_axes: [1, 2]
+    rand_gaussian_noise_prob: 0.2
+    rand_gaussian_noise_std: 0.05
+    rand_adjust_contrast_prob: 0.3
+    rand_adjust_contrast_gamma: [0.7, 1.5]
+    rand_bias_field_prob: 0.3
+    rand_bias_field_coeff_range: [0.0, 0.3]
+    rand_gaussian_smooth_prob: 0.3
+    rand_gaussian_smooth_sigma: [0.25, 1.5]
+    rand_scale_intensity_prob: 0.3
+    rand_scale_intensity_factors: 0.1
+    rand_shift_intensity_prob: 0.3
+    rand_shift_intensity_offsets: 0.1
+
+  # Validation
+  val_interval: 5  # validate every N epochs
+  sliding_window:
+    roi_size: [48, 160, 160]
+    overlap: 0.5
+    mode: gaussian
+
+  # Checkpointing
+  save_best: true
+  metric_for_best: val_dice
+  early_stopping:
+    patience: 20
+    min_delta: 0.001
+
+preprocessing:
+  orientation: RAS
+  spacing: [1.0, 0.5, 0.5]  # z, y, x in mm
+  normalize: true
+  nonzero_norm: true
+
+output:
+  experiment_dir: experiments
+  experiment_name: spine_segresnet_csf
+  mlflow_tracking_uri: experiments/mlruns
+
+device: auto  # auto-detect: mps > cuda > cpu
+seed: 42
+num_workers: 4

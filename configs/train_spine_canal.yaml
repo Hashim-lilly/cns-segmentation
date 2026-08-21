@@ -1,0 +1,148 @@
+# Training configuration for Spine-Generic T2w cord+canal segmentation
+# Phase 1 multi-structure: 3-class (background + cord + canal)
+#
+# Site names verified directly against on-disk derivatives (the baseline
+# configs/train_spine.yaml's site list uses several prefixes — "beijing",
+# "brno", "chiba", "douglas", "juntendo", "nottingham", "oxford", "tokyo" —
+# that don't match any real subject directory; see the duplicate `dataset:`
+# key bug noted in that file. This config uses the real site strings so the
+# full 254-subject/42-site cord+canal pool is actually reachable: 204
+# train / 50 val subjects, confirmed via create_datalist().
+
+data:
+  root_dir: data/spine-generic
+  contrast: T2w
+  dataset:  # registry keys, see data/dataset_registry.py — merged for compositing
+    - spine_generic_cord
+    - spine_generic_canal
+
+  # Site-based split for cross-vendor validation
+  train_sites:
+    - amu
+    - balgrist
+    - beijingGE
+    - beijingPrisma
+    - beijingVerio
+    - brnoCeitec
+    - brnoUhb
+    - cmrra
+    - cmrrb
+    - dresden
+    - fslAchieva
+    - fslPrisma
+    - hamburg
+    - mgh
+    - milan
+    - mniPilot
+    - mniS
+    - mountSinai
+    - mpicbs
+    - nottwil
+    - nwu
+    - oxfordFmrib
+    - oxfordOhba
+    - pavia
+    - perform
+    - queensland
+    - sherbrooke
+    - strasbourg
+    - tokyoIngenia
+    - tokyoSkyra
+    - ucl
+    - vallHebron
+    - vuiisAchieva
+    - vuiisIngenia
+  val_sites:
+    - barcelona
+    - cardiff
+    - geneva
+    - stanford
+    - tehranS
+    - ubc
+    - ucdavis
+    - unf
+
+  # Git-annex handling
+  min_file_size: 1000  # bytes — skip annex pointer stubs
+
+model:
+  architecture: SegResNet
+  spatial_dims: 3
+  in_channels: 1
+  out_channels: 3  # background + cord + canal
+  init_filters: 32
+  blocks_down: [1, 2, 2, 4]
+  blocks_up: [1, 1, 1]
+  dropout_prob: 0.2  # needed for Phase 3 MC-Dropout
+
+training:
+  patch_size: [48, 160, 160]
+  batch_size: 2
+  num_samples: 4  # patches per volume per epoch
+  pos_neg_ratio: 2  # for RandCropByPosNegLabel
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  optimizer: AdamW
+  scheduler: CosineAnnealingLR
+  scheduler_params:
+    T_max: 100
+    eta_min: 1.0e-6
+
+  # Loss configuration: DiceCE + Soft clDice (topology-aware)
+  loss:
+    name: CombinedLoss
+    params:
+      dice_ce_weight: 1.0
+      cldice_weight: 0.5
+      cldice_iter: 3
+
+  # Augmentation — heavy contrast/intensity domain randomization enabled
+  # for multi-structure training (canal boundaries are lower-contrast than
+  # cord's), on top of the baseline's geometric augmentations.
+  augmentation:
+    rand_flip_prob: 0.5
+    rand_flip_axes: [1, 2]
+    rand_rotate90_prob: 0.3
+    rand_rotate90_axes: [1, 2]
+    rand_gaussian_noise_prob: 0.2
+    rand_gaussian_noise_std: 0.05
+    rand_adjust_contrast_prob: 0.2
+    rand_adjust_contrast_gamma: [0.7, 1.5]
+    rand_bias_field_prob: 0.2
+    rand_bias_field_coeff_range: [0.0, 0.3]
+    rand_gaussian_smooth_prob: 0.2
+    rand_gaussian_smooth_sigma: [0.25, 1.5]
+    rand_scale_intensity_prob: 0.2
+    rand_scale_intensity_factors: 0.1
+    rand_shift_intensity_prob: 0.2
+    rand_shift_intensity_offsets: 0.1
+
+  # Validation
+  val_interval: 5  # validate every N epochs
+  sliding_window:
+    roi_size: [48, 160, 160]
+    overlap: 0.5
+    mode: gaussian
+
+  # Checkpointing
+  save_best: true
+  metric_for_best: val_dice
+  early_stopping:
+    patience: 20
+    min_delta: 0.001
+
+preprocessing:
+  orientation: RAS
+  spacing: [1.0, 0.5, 0.5]  # z, y, x in mm
+  normalize: true
+  nonzero_norm: true
+
+output:
+  experiment_dir: experiments
+  experiment_name: spine_segresnet_canal
+  mlflow_tracking_uri: experiments/mlruns
+
+device: auto  # auto-detect: mps > cuda > cpu
+seed: 42
+num_workers: 4

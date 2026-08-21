@@ -30,12 +30,12 @@
 #SBATCH --cpus-per-gpu=12
 #SBATCH --mem=80G
 #SBATCH --time=72:00:00
-#SBATCH --output=/home/l091835/cns/logs/train-%j.log
-#SBATCH --error=/home/l091835/cns/logs/train-%j.err
+#SBATCH --output=/home/l091835/CNS-Digital-Twin/cns-segmentation/logs/train-%j.log
+#SBATCH --error=/home/l091835/CNS-Digital-Twin/cns-segmentation/logs/train-%j.err
 
 set -euo pipefail
 
-BASE="/home/l091835/cns"
+BASE="/home/l091835/CNS-Digital-Twin/cns-segmentation"
 CONTAINER="$BASE/container/cns-pytorch.sif"
 
 CONFIG="${CONFIG:-configs/train_spine.yaml}"
@@ -77,13 +77,13 @@ apptainer exec \
   bash -c "
     set -euo pipefail
     cd '$BASE'
-    export PYTHONPATH='$BASE:\${PYTHONPATH:-}'
+    export PYTHONPATH='$BASE/src:\${PYTHONPATH:-}'
 
     echo '--- GPU Info ---'
     nvidia-smi
     echo '--- Python / Device ---'
     python -c \"import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')\"
-    python -c \"from src.models.segresnet import get_device; print(f'Resolved device: {get_device()}')\"
+    python -c \"from cns_segmentation.models.segresnet import get_device; print(f'Resolved device: {get_device()}')\"
     echo '----------------'
 
     python scripts/train.py $CLI_ARGS

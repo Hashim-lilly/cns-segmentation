@@ -8,7 +8,6 @@ Usage:
 
 import logging
 import random
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -25,10 +24,9 @@ from rich.table import Table
 # Ensure project root is importable
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.models.segresnet import get_device  # noqa: E402
-from src.training.trainer import SegmentationTrainer  # noqa: E402
+from cns_segmentation.models.segresnet import get_device
+from cns_segmentation.training.trainer import SegmentationTrainer
 
 # ---------------------------------------------------------------------------
 # Logging & console setup

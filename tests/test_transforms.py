@@ -1,4 +1,4 @@
-"""Tests for MONAI transform pipelines defined in src.data.transforms.
+"""Tests for MONAI transform pipelines defined in cns_segmentation.data.transforms.
 
 Validates that training, validation, and post-processing pipelines produce
 outputs with correct keys, shapes, dtypes, and deterministic behaviour.
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.data.transforms import get_post_transforms, get_train_transforms, get_val_transforms
+from cns_segmentation.data.transforms import get_post_transforms, get_train_transforms, get_val_transforms
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +201,71 @@ class TestValTransforms:
 
         assert "image" in result
         assert "label" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: structures / CompositeLabeld integration
+# ---------------------------------------------------------------------------
+
+
+class TestMultiStructureTransforms:
+    """Tests for the CompositeLabeld-driven multi-structure pipeline path."""
+
+    def test_train_transforms_composite_labels_with_structures(
+        self, sample_config: dict, synthetic_multistructure_nifti: dict[str, Path]
+    ) -> None:
+        transforms = get_train_transforms(sample_config, structures=["canal", "cord"])
+        data = {
+            "image": str(synthetic_multistructure_nifti["image"]),
+            "label_canal": str(synthetic_multistructure_nifti["label_canal"]),
+            "label_cord": str(synthetic_multistructure_nifti["label_cord"]),
+        }
+        result = transforms(data)
+
+        assert isinstance(result, list)
+        for sample in result:
+            assert "label" in sample
+            assert "label_canal" not in sample
+            assert "label_cord" not in sample
+            unique_values = set(torch.unique(sample["label"]).tolist())
+            assert unique_values.issubset({0.0, 1.0, 2.0})
+
+    def test_val_transforms_composite_labels_with_structures(
+        self, sample_config: dict, synthetic_multistructure_nifti: dict[str, Path]
+    ) -> None:
+        transforms = get_val_transforms(sample_config, structures=["canal", "cord"])
+        data = {
+            "image": str(synthetic_multistructure_nifti["image"]),
+            "label_canal": str(synthetic_multistructure_nifti["label_canal"]),
+            "label_cord": str(synthetic_multistructure_nifti["label_cord"]),
+        }
+        result = transforms(data)
+
+        assert "label" in result
+        assert "label_canal" not in result
+        assert "label_cord" not in result
+        unique_values = set(torch.unique(result["label"]).tolist())
+        assert unique_values.issubset({0.0, 1.0, 2.0})
+
+    def test_overlap_region_resolves_to_higher_priority_structure(
+        self, sample_config: dict, synthetic_multistructure_nifti: dict[str, Path]
+    ) -> None:
+        """The fixture's cord/canal masks deliberately overlap at the volume
+        center. DEFAULT_LABEL_PRIORITY ranks cord above canal, so the merged
+        label at that overlap must carry cord's class id, while canal's own
+        (non-overlapping) ring must keep canal's id."""
+        transforms = get_val_transforms(sample_config, structures=["canal", "cord"])
+        data = {
+            "image": str(synthetic_multistructure_nifti["image"]),
+            "label_canal": str(synthetic_multistructure_nifti["label_canal"]),
+            "label_cord": str(synthetic_multistructure_nifti["label_cord"]),
+        }
+        result = transforms(data)
+        label = result["label"]
+
+        # canal=1, cord=2 per DEFAULT_LABEL_PRIORITY filtered order.
+        assert label[0, 32, 96, 96] == 2  # inside both footprints -- cord wins
+        assert label[0, 24, 96, 96] == 1  # canal-only ring
 
 
 # ---------------------------------------------------------------------------

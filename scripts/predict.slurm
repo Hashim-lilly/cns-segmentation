@@ -27,12 +27,12 @@
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
-#SBATCH --output=/home/l091835/cns/logs/predict-%j.log
-#SBATCH --error=/home/l091835/cns/logs/predict-%j.err
+#SBATCH --output=/home/l091835/CNS-Digital-Twin/cns-segmentation/logs/predict-%j.log
+#SBATCH --error=/home/l091835/CNS-Digital-Twin/cns-segmentation/logs/predict-%j.err
 
 set -euo pipefail
 
-BASE="/home/l091835/cns"
+BASE="/home/l091835/CNS-Digital-Twin/cns-segmentation"
 CONTAINER="$BASE/container/cns-pytorch.sif"
 
 SPLIT="${SPLIT:-val}"
@@ -62,12 +62,12 @@ apptainer exec \
   bash -c "
     set -euo pipefail
     cd '$BASE'
-    export PYTHONPATH='$BASE:\${PYTHONPATH:-}'
+    export PYTHONPATH='$BASE/src:\${PYTHONPATH:-}'
 
     echo '--- GPU Info ---'
     nvidia-smi
     echo '--- Python / Device ---'
-    python -c \"from src.models.segresnet import get_device; print(f'Resolved device: {get_device()}')\"
+    python -c \"from cns_segmentation.models.segresnet import get_device; print(f'Resolved device: {get_device()}')\"
     echo '----------------'
 
     python scripts/predict.py $CLI_ARGS

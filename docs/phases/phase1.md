@@ -68,7 +68,7 @@ Split by SITE (not random):
 
 ## Device Handling
 ```python
-from src.models.segresnet import get_device, empty_cache
+from cns_segmentation.models.segresnet import get_device, empty_cache
 
 device = get_device()  # MPS > CUDA > CPU, whichever is best available
 # Some MONAI ops need CPU fallback — wrap in try/except
