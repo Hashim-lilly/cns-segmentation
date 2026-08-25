@@ -5,6 +5,57 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+import trimesh
+
+
+@pytest.fixture()
+def icosphere_mesh() -> trimesh.Trimesh:
+    """A closed, watertight, manifold reference mesh (χ=2).
+
+    Radius 10 (not trimesh's unit-radius default) so its volume (~4047 mm³)
+    and surface area (~1233 mm²) clear the module's default component
+    thresholds (`min_component_volume_mm3=100.0`, `min_component_area_mm2=20.0`)
+    — a unit-radius sphere (volume ~4.2 mm³) would itself look like a
+    rejectable small fragment.
+    """
+    return trimesh.creation.icosphere(subdivisions=2, radius=10.0)
+
+
+@pytest.fixture()
+def icosphere_with_tiny_sliver(icosphere_mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Watertight icosphere plus a disconnected, non-watertight, tiny-area triangle.
+
+    Mirrors a spurious marching-cubes fragment: never watertight (single
+    triangle = open boundary) and far below the 20 mm² default area
+    threshold (area=0.125 mm²), so it should be rejected by the new
+    component-area filter in `repair_mesh()`.
+    """
+    sliver = trimesh.Trimesh(
+        vertices=[[100.0, 100.0, 100.0], [100.5, 100.0, 100.0], [100.0, 100.5, 100.0]],
+        faces=[[0, 1, 2]],
+    )
+    return trimesh.util.concatenate([icosphere_mesh, sliver])
+
+
+@pytest.fixture()
+def unfixable_by_trimesh_mesh(icosphere_mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Icosphere with 3 faces removed — empirically confirmed NOT closeable by
+    trimesh's own fill_holes/fix_normals/fix_winding alone (stays non-watertight,
+    euler=1), but closeable by the PyMeshLab fallback (euler->2). Removing only
+    1 face is not a valid fixture here: trimesh alone already closes that case.
+    """
+    return trimesh.Trimesh(vertices=icosphere_mesh.vertices.copy(), faces=icosphere_mesh.faces[:-3].copy())
+
+
+@pytest.fixture()
+def open_mesh_one_face_removed(icosphere_mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Icosphere with 1 face removed: is_watertight=False but is_winding_consistent=True.
+
+    This is the case that made the old `is_manifold = mesh.is_winding_consistent`
+    (cns-segmentation) / `is_manifold = mesh.is_watertight` (cns-cfd-simulation)
+    definitions disagree — neither field alone is a correct manifold check.
+    """
+    return trimesh.Trimesh(vertices=icosphere_mesh.vertices.copy(), faces=icosphere_mesh.faces[:-1].copy())
 
 
 @pytest.fixture()

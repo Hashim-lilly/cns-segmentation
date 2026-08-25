@@ -24,6 +24,8 @@ import nibabel as nib
 import numpy as np
 from skimage import measure
 
+from cns_segmentation.mesh.quality import is_manifold
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -31,6 +33,11 @@ try:
 except ImportError:
     trimesh = None
     logger.warning("trimesh not installed; mesh operations unavailable.")
+
+try:
+    import pymeshlab
+except ImportError:
+    pymeshlab = None
 
 
 @dataclass
@@ -46,6 +53,7 @@ class MeshQuality:
     has_degenerate_faces: bool = False
     min_face_area: float = 0.0
     passes_cfd_check: bool = False
+    repair_forced: bool = False
 
 
 @dataclass
@@ -56,7 +64,8 @@ class MeshExportConfig:
     smooth_lambda: float = 0.5  # Taubin smoothing lambda
     smooth_mu: float = -0.53  # Taubin smoothing mu (negative for volume preservation)
     decimate_target: Optional[int] = None  # Target face count; None = no decimation
-    min_component_volume_mm3: float = 100.0  # Remove components smaller than this
+    min_component_volume_mm3: float = 100.0  # Remove watertight components smaller than this
+    min_component_area_mm2: float = 20.0  # Remove non-watertight fragments smaller than this
     fill_holes_max_size: int = 100  # Max hole size (edges) to auto-fill
     output_format: str = "stl"
 
@@ -147,25 +156,36 @@ def repair_mesh(
         mesh.update_faces(~degenerate_mask)
         logger.info("Removed %d degenerate faces.", n_degenerate)
 
-    # Step 4: Remove small disconnected components
-    if config.min_component_volume_mm3 > 0:
+    # Step 4: Remove small disconnected components.
+    # comp.volume is only meaningful for watertight fragments (silently wrong
+    # otherwise); comp.convex_hull.volume raises QhullError on near-planar
+    # slivers. comp.area (surface area) is well-defined for any fragment and
+    # is what non-watertight components are thresholded on below.
+    if config.min_component_volume_mm3 > 0 or config.min_component_area_mm2 > 0:
         components = mesh.split(only_watertight=False)
         if len(components) > 1:
-            # Keep only components above the volume threshold
             kept = []
+            n_rejected = 0
             for comp in components:
-                if comp.is_watertight and comp.volume > config.min_component_volume_mm3:
+                if comp.is_watertight:
+                    if comp.volume > config.min_component_volume_mm3:
+                        kept.append(comp)
+                    else:
+                        n_rejected += 1
+                elif comp.area > config.min_component_area_mm2:
                     kept.append(comp)
-                elif not comp.is_watertight:
-                    # Keep non-watertight components (might be the main body)
-                    kept.append(comp)
+                else:
+                    n_rejected += 1
             if kept:
                 mesh = trimesh.util.concatenate(kept)
                 logger.info(
-                    "Kept %d of %d components (volume threshold: %.1f mm³).",
+                    "Kept %d of %d components (rejected %d below volume=%.1f mm³ / "
+                    "area=%.1f mm² thresholds).",
                     len(kept),
                     len(components),
+                    n_rejected,
                     config.min_component_volume_mm3,
+                    config.min_component_area_mm2,
                 )
 
     # Step 5: Taubin smoothing (volume-preserving)
@@ -191,6 +211,54 @@ def repair_mesh(
     return mesh
 
 
+def _pymeshlab_repair(
+    mesh: "trimesh.Trimesh", config: Optional[MeshExportConfig] = None
+) -> "trimesh.Trimesh":
+    """Fallback repair via PyMeshLab, for topology trimesh's own repair can't fix.
+
+    Handoff is in-memory (no temp-file round trip, which would lose shared-
+    vertex topology through STL's per-triangle-disconnected-vertex format).
+    Deliberately does NOT smooth — per the module's "never smooth first" rule,
+    the caller re-applies the same Taubin smoothing step used by `repair_mesh`
+    after this returns, so smoothing always happens last regardless of which
+    repair path ran.
+
+    Args:
+        mesh: Mesh that trimesh's own `repair_mesh()` failed to make CFD-ready.
+        config: Mesh export configuration.
+
+    Returns:
+        Repaired trimesh.Trimesh (unsmoothed).
+
+    Raises:
+        ImportError: If pymeshlab is not installed.
+    """
+    if pymeshlab is None:
+        raise ImportError("pymeshlab is required for the mesh-repair fallback: pip install pymeshlab")
+    if config is None:
+        config = MeshExportConfig()
+
+    ms = pymeshlab.MeshSet()
+    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=mesh.vertices, face_matrix=mesh.faces))
+
+    ms.meshing_close_holes(maxholesize=config.fill_holes_max_size, selfintersection=True)
+    ms.meshing_re_orient_faces_coherently()
+    ms.meshing_repair_non_manifold_edges(method="Remove Faces")
+    ms.meshing_repair_non_manifold_vertices()
+    ms.meshing_remove_duplicate_faces()
+    ms.meshing_remove_duplicate_vertices()
+
+    repaired = ms.current_mesh()
+    logger.info(
+        "PyMeshLab repair: %d vertices, %d faces (from %d/%d).",
+        repaired.vertex_number(),
+        repaired.face_number(),
+        len(mesh.vertices),
+        len(mesh.faces),
+    )
+    return trimesh.Trimesh(vertices=repaired.vertex_matrix(), faces=repaired.face_matrix())
+
+
 def validate_mesh(mesh: "trimesh.Trimesh") -> MeshQuality:
     """Validate mesh quality for CFD readiness.
 
@@ -209,7 +277,7 @@ def validate_mesh(mesh: "trimesh.Trimesh") -> MeshQuality:
     quality = MeshQuality()
 
     quality.is_watertight = mesh.is_watertight
-    quality.is_manifold = mesh.is_winding_consistent
+    quality.is_manifold = is_manifold(mesh)
     quality.euler_number = mesh.euler_number
     quality.vertex_count = len(mesh.vertices)
     quality.face_count = len(mesh.faces)
@@ -276,6 +344,25 @@ def export_cfd_mesh(
 
     # Validate
     quality = validate_mesh(mesh)
+
+    # Fallback: trimesh's own repair couldn't make this CFD-ready. Try
+    # PyMeshLab's non-manifold-edge/vertex repair (no trimesh equivalent),
+    # then re-apply the same Taubin smoothing repair_mesh() would have run.
+    if not quality.passes_cfd_check:
+        quality.repair_forced = True
+        try:
+            mesh = _pymeshlab_repair(mesh, config)
+            if config.smooth_iterations > 0:
+                trimesh.smoothing.filter_taubin(
+                    mesh,
+                    lamb=config.smooth_lambda,
+                    nu=config.smooth_mu,
+                    iterations=config.smooth_iterations,
+                )
+            quality = validate_mesh(mesh)
+            quality.repair_forced = True
+        except Exception as exc:
+            logger.warning("PyMeshLab repair fallback failed, keeping trimesh-only result: %s", exc)
 
     # Export
     output_path = Path(output_path)

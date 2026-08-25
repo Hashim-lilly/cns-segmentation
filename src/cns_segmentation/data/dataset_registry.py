@@ -294,3 +294,35 @@ def get_dataset(name: str) -> DatasetSpec:
 def list_datasets() -> list[str]:
     """List all registered dataset names."""
     return list(DATASETS.keys())
+
+
+def list_subjects(spec: DatasetSpec, min_file_size: int = 1000) -> list[str]:
+    """Enumerate subjects with a usable raw T2w image under this spec's root.
+
+    Deliberately independent of label/ground-truth availability (unlike
+    `spine_generic.create_datalist()`, which requires a label to exist) —
+    intended for batch runners that need every subject with an input image,
+    including ones a segmentation model has never seen ground truth for.
+
+    Args:
+        spec: Dataset spec to enumerate. Non-directory `root` (e.g.
+            "sass_2017_reference", which points at a constants module) or
+            role="comparison_only" specs return an empty list.
+        min_file_size: Minimum byte size for a raw image file to count as
+            present — filters out git-annex pointer stubs (~100 bytes).
+
+    Returns:
+        Sorted list of BIDS subject IDs (e.g. "sub-amu01") with a raw T2w
+        image of at least `min_file_size` bytes at
+        `<root>/<subject_id>/anat/<subject_id>_T2w.nii.gz`.
+    """
+    if spec.role == "comparison_only" or not spec.root.is_dir():
+        return []
+    subjects = []
+    for subject_dir in sorted(spec.root.glob("sub-*")):
+        if not subject_dir.is_dir():
+            continue
+        t2w_path = subject_dir / "anat" / f"{subject_dir.name}_T2w.nii.gz"
+        if t2w_path.exists() and t2w_path.stat().st_size >= min_file_size:
+            subjects.append(subject_dir.name)
+    return subjects
